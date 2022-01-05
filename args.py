@@ -6,7 +6,7 @@ import argparse
 def _add_common_args(parser):
     parser.add_argument('--config', type=str, required=True)
     parser.add_argument('--device', type=str, required=True)
-    parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument('--local_rank', type=int, default=-1)
     parser.add_argument('--debug', action='store_true')
     return parser
 
