@@ -1,0 +1,26 @@
+{
+  "task": {
+    "task_name": "train_mlm",
+    "model": "bert",
+    "dataset": "mlm_dataset",
+    "trainer": "gpu_trainer",
+    "checkpoint_file": "pretrained-models/vilt-base-uncased/model.bin",
+    "seq_len": 128
+  },
+  "model": {
+    "checkpoint_file": "",
+    "vocab_file": ""
+  },
+  "optim": {
+    "epochs": 10,
+    "warmup_epochs": 1,
+    "train_batch_size_per_gpu": 96,
+    "gradient_accumulation_steps": 4,
+    "eval_batch_size": 1,
+    "predict_batch_size": 1,
+    "lr": 3e-5,
+    "end_lr": 0,
+    "weight_decay": 0.01,
+    "decay_power": 1
+  }
+}
