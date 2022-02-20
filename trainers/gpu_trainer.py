@@ -1,27 +1,21 @@
 # -*- coding: utf - 8 -*-
 
-import os
-import json
-
 from tqdm import tqdm
 
 import torch
-import torch.distributed as dist
-from torch.utils.data import DataLoader, RandomSampler
-
-from transformers.optimization import AdamW, get_linear_schedule_with_warmup
+from torch.utils.data import DataLoader
 
 from models import get_model_cls
 from datasets import get_dataset_cls
+from optimizers import get_optimizer
+from schedulers import get_scheduler
 import utils
 
 
 class GPUTrainer:
     def __init__(self, configs):
         self.configs = configs
-        os.environ['CUDA_VISIBLE_DEVICES'] = self.configs.devices
-        self.model_save_dir = os.path.join('_saved_models', self.configs.config)
-        os.makedirs(self.model_save_dir, exist_ok=True)
+        self.device = torch.device('cuda', int(configs.device))
 
     def run(self, mode):
         MAPPINGS = {
@@ -34,38 +28,34 @@ class GPUTrainer:
     def train(self):
         configs = self.configs
 
-        dataset_cls = get_dataset_cls(configs.task.dataset_cls)
+        # ===== 1. load data =====
+        dataset_cls = get_dataset_cls(configs.setup.dataset_cls)
         train_dataset = dataset_cls(configs, 'train')
 
-        train_sampler = RandomSampler(data_source=train_dataset)
         train_loader = DataLoader(
-            train_dataset, batch_size=configs.optim.train_batch_size_per_gpu,
-            pin_memory=True, sampler=train_sampler, drop_last=True,
+            train_dataset, batch_size=configs.trainer_configs.train_batch_size_per_gpu,
+            pin_memory=True, shuffle=True, drop_last=True,
             collate_fn=train_dataset.train_collate_fn,
-            num_workers=8
+            # num_workers=8
         )
 
-        model_cls = get_model_cls(configs.model.model_cls)
-        model = model_cls(configs)
-        model = self.load_model(model, 'train')
-        model.cuda()
+        # ===== 2. load model and optimizer =====
+        model, optimizer, scheduler = self.setup_model_and_optimizer(len(train_loader))
 
-        optimizer, scheduler = self.configure_optimizers(model)
-
-        for epoch in range(1, configs.optim.epochs + 1):
-
+        # ===== 3. train model =====
+        for epoch in range(1, configs.trainer_configs.epochs + 1):
             model.train()
             losses = []
 
             train_loader = tqdm(
                 train_loader, ncols=0,
-                desc='Train epoch %s/%s' % (epoch, configs.optim.epochs)
+                desc='Train epoch %s/%s' % (epoch, configs.trainer_configs.epochs)
             )
 
             for batch in train_loader:
-                batch = utils.to_device(batch, device)
+                batch = utils.to_device(batch, self.device)
                 optimizer.zero_grad()
-                loss = model(batch, task=configs.task.task_name)
+                loss = model(batch, task=configs.task_name)
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
@@ -75,7 +65,7 @@ class GPUTrainer:
                     'loss': str(round(sum(losses) / len(losses), 4))
                 })
 
-            self.save_model(model.module)
+            model.save_checkpoint()
 
     def eval(self):
         pass
@@ -83,28 +73,41 @@ class GPUTrainer:
     def predict(self):
         pass
 
-    def configure_optimizers(self, model):
-        params = model.get_optimizer_params()
-        step_samples = configs.optim.train_batch_size_per_gpu * configs.optim.gradient_accumulation_steps * int(os.getenv('WORLD_SIZE'))
-        steps_per_epoch = len(train_dataset) // step_samples
-        optimizer = AdamW(params, lr=configs.optim.lr, weight_decay=0.01)
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=steps_per_epoch * configs.optim.warmup_epochs,
-            num_training_steps=steps_per_epoch * configs.optim.epochs
-        )
-        return optimizer, scheduler
+    def setup_model_and_optimizer(self, num_batches):
+        model = self.get_model()
+        optimizer = self.get_optimizer(model.get_optimizer_params())
+        lr_scheduler = self.get_lr_scheduler(optimizer, num_batches)
+        return model, optimizer, lr_scheduler
 
-    def load_model(self, model, mode):
-        if mode == 'train':
-            model_load_path = self.configs.task.model_load_path
-        else:
-            model_load_path = os.path.join(self.model_save_dir, 'model.states')
+    def get_model(self):
 
-        model_states = torch.load(model_load_path, map_location='cpu')
-        model.load_state_dict(model_states, strict=False)
+        model_cls = get_model_cls(self.configs.setup.model_cls)
+        model = model_cls(self.configs)
+        model.load_checkpoint()
+        model.to(self.device)
         return model
 
-    def save_model(self, model):
-        save_path = os.path.join(self.model_save_dir, 'model.states')
-        torch.save(model.state_dict(), save_path)
+    def get_optimizer(self, params):
+        trainer_configs = self.configs.trainer_configs.optimizer_configs
+        optimizer = get_optimizer(
+            name=self.configs.trainer_configs.optimizer,
+            params=params, configs=vars(trainer_configs)
+        )
+        return optimizer
+
+    def get_lr_scheduler(self, optimizer, num_batches):
+        num_warmup_steps = num_batches * self.configs.trainer_configs.warmup_epochs
+        num_training_steps = num_batches * self.configs.trainer_configs.epochs
+
+        scheduler_configs = vars(self.configs.trainer_configs.scheduler_configs)
+        scheduler_configs.update({
+            'num_warmup_steps': num_warmup_steps,
+            'num_training_steps': num_training_steps
+        })
+
+        lr_scheduler = get_scheduler(
+            name=self.configs.trainer_configs.scheduler,
+            optimizer=optimizer, configs=scheduler_configs
+        )
+
+        return lr_scheduler
